@@ -4,7 +4,7 @@
   Renders the product information layout with media gallery and product details.
   Used by both product-information and featured-product-information sections.
 
-  @param {number} product_media_size - Number of media items in the product
+  @param {product} product - Product object
   @param {string} section_id - Unique section ID
   @param {object} settings - Section settings object
   @param {string} media_gallery - Captured HTML for the product media gallery block
@@ -25,7 +25,7 @@
   {% endcapture %}
 
   {% render 'product-information-content',
-    product_media_size: product.media.size,
+    product: product,
     section_id: section.id,
     settings: section.settings,
     media_gallery: media_gallery,
@@ -44,7 +44,7 @@
 
   # Check if product has media
   assign product_has_media = true
-  if product_media_size == 0
+  if product.media.size == 0
     assign product_has_media = false
   endif
 
@@ -76,9 +76,17 @@
   endcase
 %}
 
-<div class="section-background color-{{ settings.color_scheme }}"></div>
+{% liquid
+  if settings.background_color != blank
+    render 'contrast-override', background_color: settings.background_color, section_id: section_id
+  endif
+%}
+
 <div
-  class="product-information section section--{{ content_width }} spacing-style color-{{ settings.color_scheme }} relative"
+  class="section-background{% if settings.background_color != blank %} color-custom-{{ section_id }}{% endif %}"
+></div>
+<div
+  class="product-information section section--{{ content_width }} spacing-style{% if settings.background_color != blank %} color-custom-{{ section_id }}{% endif %} relative"
   style="{% render 'spacing-style', settings: settings %} --gap: {{ settings.gap }}px;"
   data-testid="product-information"
 >
@@ -86,9 +94,12 @@
     {% assign product_href = '#ProductInformation-' | append: section_id %}
     {% render 'skip-to-content-link', href: product_href, text: 'accessibility.skip_to_product_info' %}
   {% endif %}
-  <div
+  <product-component
     class="{{ product_grid_class }}"
     data-product-grid-content
+    {% unless product.id == blank %}
+      view-event-payload="{{ product | standard_event_data: 'view' | escape }}"
+    {% endunless %}
   >
     {% assign render_order_array = render_order | split: ',' %}
     {% capture media %}
@@ -107,7 +118,7 @@
         {{ product_details }}
       {% endif %}
     {% endfor %}
-  </div>
+  </product-component>
 
   {{ additional_blocks }}
 </div>
@@ -165,18 +176,17 @@
       }
     }
 
-    /* Position when there is media */
+    /* Position when there is media. Gap paddings are logical properties to respect reading direction */
     .product-information__grid:not(.product-information--media-none) {
-      /* Media on the left side */
       &.product-information--media-left {
         grid-template-columns: 1fr min(50vw, var(--sidebar-width));
 
         .product-information__media {
-          padding-right: calc(var(--gap, 0) / 2);
+          padding-inline-end: calc(var(--gap, 0) / 2);
         }
 
         .product-details {
-          padding-left: calc(var(--gap, 0) / 2);
+          padding-inline-start: calc(var(--gap, 0) / 2);
         }
 
         &:has(.media-gallery--extend) {
@@ -184,17 +194,16 @@
         }
       }
 
-      /* Media on the right side */
       &.product-information--media-right {
         grid-template-columns: min(50vw, var(--sidebar-width)) 1fr;
 
         .product-information__media {
-          padding-left: calc(var(--gap, 0) / 2);
+          padding-inline-start: calc(var(--gap, 0) / 2);
           order: 1;
         }
 
         .product-details {
-          padding-right: calc(var(--gap, 0) / 2);
+          padding-inline-end: calc(var(--gap, 0) / 2);
           order: 0;
         }
 
@@ -310,8 +319,13 @@
     }
   }
 
-  /* If the header is sticky, make product details content stick underneath the header */
-  body:has(#header-group #header-component[data-sticky-state='active']) .product-details.sticky-content--desktop {
+  /* If the header is sticky, make product details content stick underneath the header.
+     Header-dependent page rules use #header-group as the :has() subject and reach the page with `~`.
+     With body as the subject, every [open] or [aria-expanded] change in the header restyles the whole page. */
+  #header-group:has(> .header-section > #header-component[data-sticky-state='active'])
+    ~ *
+    .product-details.sticky-content--desktop,
+  quick-add-dialog[header-sticky-active] .product-details.sticky-content--desktop {
     --sticky-header-offset: var(--header-height);
   }
 {% endstylesheet %}

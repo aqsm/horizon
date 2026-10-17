@@ -448,9 +448,18 @@
   {% endif %}
 {% endcapture %}
 
+{%- liquid
+  if section.settings.background_color != blank
+    render 'contrast-override', background_color: section.settings.background_color, section_id: section.id, skip_contrast: true
+  endif
+-%}
+
+{% # A first-section hero consumes `--header-group-height` at first paint (`.hero-wrapper:first-child` rule below) %}
+{% render 'measure-header-heights', only_when_first_section: true %}
+
 <div
   id="Hero-{{ section.id }}"
-  class="hero color-{{ section.settings.color_scheme }}{% if section.blocks.size == 0 and section.settings.section_height == 'auto' %} hero--no-blocks-auto-height{% endif %}{% if section.settings.stack_media_on_mobile %} hero--stack-mobile{% endif %}"
+  class="hero{% if section.settings.background_color != blank %} color-custom-{{ section.id }}{% endif %}{% if section.blocks.size == 0 and section.settings.section_height == 'auto' %} hero--no-blocks-auto-height{% endif %}{% if section.settings.stack_media_on_mobile %} hero--stack-mobile{% endif %}"
   style="
     --hero-border-style: {{ section.settings.border }};
     --hero-border-width: {{ section.settings.border_width }}px;
@@ -542,8 +551,10 @@
     --hero-height-offset: 0px;
   }
 
-  /* Being extra specific in the selector for performance reasons */
-  body:has(> #header-group > .header-section > #header-component) .hero-wrapper:first-child {
+  /* Being extra specific in the selector for performance reasons.
+     Header-dependent page rules use #header-group as the :has() subject and reach the page with `~`.
+     With body as the subject, every [open] or [aria-expanded] change in the header restyles the whole page. */
+  #header-group:has(> .header-section > #header-component) ~ * .hero-wrapper:first-child {
     --hero-height-offset: var(--header-group-height, 0);
   }
 
@@ -668,6 +679,15 @@
     :is(a, button, input, textarea, select, details, summary) {
       pointer-events: auto;
     }
+
+    /*
+     * App blocks own their interactive markup, and an app is free to render it into a shadow
+     * root that no selector here can reach. Restoring pointer events on the app block wrapper
+     * covers both cases, because pointer-events inherits into the shadow tree.
+     */
+    .shopify-app-block {
+      pointer-events: auto;
+    }
   }
 
   .hero__content-wrapper--design-mode * {
@@ -737,8 +757,8 @@
       width: 50%;
 
       &:last-child {
-        right: 0;
-        left: auto;
+        inset-inline-end: 0;
+        inset-inline-start: auto;
       }
     }
   }
@@ -976,15 +996,15 @@
       "options": [
         {
           "value": "flex-start",
-          "label": "t:options.left"
+          "label": "t:options.direction_start"
         },
         {
           "value": "center",
-          "label": "t:options.center"
+          "label": "t:options.direction_center"
         },
         {
           "value": "flex-end",
-          "label": "t:options.right"
+          "label": "t:options.direction_end"
         },
         {
           "value": "space-between",
@@ -1029,15 +1049,15 @@
       "options": [
         {
           "value": "flex-start",
-          "label": "t:options.left"
+          "label": "t:options.direction_start"
         },
         {
           "value": "center",
-          "label": "t:options.center"
+          "label": "t:options.direction_center"
         },
         {
           "value": "flex-end",
-          "label": "t:options.right"
+          "label": "t:options.direction_end"
         }
       ],
       "default": "flex-start",
@@ -1142,10 +1162,10 @@
       "content": "t:content.appearance"
     },
     {
-      "type": "color_scheme",
-      "id": "color_scheme",
-      "label": "t:settings.color_scheme",
-      "default": "scheme-1"
+      "type": "color",
+      "id": "background_color",
+      "label": "t:settings.background_color",
+      "placeholder": "t:settings.default"
     },
     {
       "type": "checkbox",
@@ -1246,7 +1266,7 @@
         "text_1": {
           "type": "text",
           "settings": {
-            "text": "t:html_defaults.new_arrivals_h1",
+            "text": "t:html_defaults.new_arrivals_h2",
             "type_preset": "h1",
             "max_width": "narrow"
           }
@@ -1273,7 +1293,6 @@
         "horizontal_alignment_flex_direction_column": "center",
         "gap": 16,
         "section_height": "large",
-        "color_scheme": "scheme-5",
         "padding-block-start": 40,
         "padding-block-end": 40,
         "toggle_overlay": true,
@@ -1318,7 +1337,6 @@
         "vertical_alignment_flex_direction_column": "space-between",
         "gap": 32,
         "section_height": "large",
-        "color_scheme": "scheme-5",
         "padding-block-start": 0,
         "padding-block-end": 40,
         "toggle_overlay": true,
@@ -1347,8 +1365,6 @@
             "custom_width_mobile": 100,
             "height": "fit",
             "custom_height": 100,
-            "inherit_color_scheme": true,
-            "color_scheme": "",
             "background_media": "none",
             "video_position": "cover",
             "background_image_position": "cover",
@@ -1380,8 +1396,6 @@
                 "custom_width_mobile": 100,
                 "height": "fit",
                 "custom_height": 100,
-                "inherit_color_scheme": true,
-                "color_scheme": "",
                 "background_media": "none",
                 "video_position": "cover",
                 "background_image_position": "cover",
@@ -1397,9 +1411,9 @@
               "blocks": {
                 "text_intro": {
                   "type": "text",
-                  "name": "t:names.heading",
+                  "name": "t:names.text",
                   "settings": {
-                    "text": "t:html_defaults.introducing_h2",
+                    "text": "t:html_defaults.introducing_p",
                     "width": "100%",
                     "max_width": "normal",
                     "alignment": "left",
@@ -1410,10 +1424,6 @@
                     "letter_spacing": "normal",
                     "case": "none",
                     "wrap": "pretty",
-                    "color": "",
-                    "background": false,
-                    "background_color": "#00000026",
-                    "corner_radius": 0,
                     "padding-block-start": 0,
                     "padding-block-end": 0,
                     "padding-inline-start": 0,
@@ -1424,7 +1434,7 @@
                   "type": "text",
                   "name": "t:names.heading",
                   "settings": {
-                    "text": "t:html_defaults.new_arrivals_h1",
+                    "text": "t:html_defaults.new_arrivals_h2",
                     "width": "100%",
                     "max_width": "normal",
                     "alignment": "left",
@@ -1435,10 +1445,6 @@
                     "letter_spacing": "normal",
                     "case": "none",
                     "wrap": "pretty",
-                    "color": "",
-                    "background": false,
-                    "background_color": "#00000026",
-                    "corner_radius": 0,
                     "padding-block-start": 0,
                     "padding-block-end": 0,
                     "padding-inline-start": 0,
@@ -1463,10 +1469,6 @@
                 "letter_spacing": "normal",
                 "case": "none",
                 "wrap": "pretty",
-                "color": "",
-                "background": false,
-                "background_color": "#00000026",
-                "corner_radius": 0,
                 "padding-block-start": 0,
                 "padding-block-end": 0,
                 "padding-inline-start": 0,
@@ -1484,7 +1486,6 @@
         "vertical_alignment_flex_direction_column": "flex-end",
         "gap": 16,
         "section_height": "large",
-        "color_scheme": "scheme-5",
         "padding-block-start": 40,
         "padding-block-end": 40,
         "toggle_overlay": true,

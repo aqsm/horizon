@@ -1,7 +1,9 @@
 import { Component } from '@theme/component';
-import { CartAddEvent, QuantitySelectorUpdateEvent, ThemeEvents } from '@theme/events';
+import { QuantitySelectorUpdateEvent, ThemeEvents } from '@theme/events';
 import { debounce, fetchConfig, resetShimmer } from '@theme/utilities';
 import { morphSection, sectionRenderer } from '@theme/section-renderer';
+import { CartErrorEvent, CartLinesUpdateEvent, StandardEvents } from '@shopify/events';
+import { getScrollTop, scrollTo } from '@theme/scroll-container';
 
 /**
  * A custom element that manages the quick order list section.
@@ -32,11 +34,17 @@ class QuickOrderListComponent extends Component {
   /** @type {AbortController|null} */
   #abortController = null;
 
+  /** @type {Promise<unknown> | null} */
+  #pendingQuantityUpdate = null;
+
   /** @type {(event: Event) => void} */
   #debouncedHandleQuantityUpdate;
 
-  /** @type {(event: Event) => void} */
+  /** @type {(event: CartLinesUpdateEvent) => void} */
   #boundHandleCartUpdate;
+
+  /** @type {HTMLElement|null} */
+  #confirmationTrigger = null;
 
   /**
    * Gets the current page number from pagination controls
@@ -63,6 +71,18 @@ class QuickOrderListComponent extends Component {
     return JSON.parse(data);
   }
 
+  /**
+   * Gets the AJAX cart line keys (`<variant_id>:<hash>`) for items currently
+   * in the cart for this product, parallel to `cartVariantIds`.
+   * @returns {string[]}
+   */
+  get cartLineKeys() {
+    const data = this.dataset.cartLineKeys;
+    if (!data) return [];
+
+    return JSON.parse(data);
+  }
+
   connectedCallback() {
     super.connectedCallback();
 
@@ -70,7 +90,8 @@ class QuickOrderListComponent extends Component {
     this.#boundHandleCartUpdate = this.#handleCartUpdate.bind(this);
 
     this.addEventListener(ThemeEvents.quantitySelectorUpdate, this.#debouncedHandleQuantityUpdate);
-    document.addEventListener(ThemeEvents.cartUpdate, this.#boundHandleCartUpdate);
+    document.addEventListener(StandardEvents.cartLinesUpdate, this.#boundHandleCartUpdate);
+    document.addEventListener(StandardEvents.cartDiscountUpdate, this.#handleDiscountUpdate);
     this.addEventListener('keydown', this.#handleKeyDown, true);
     this.addEventListener('keyup', this.#handleKeyup, true);
   }
@@ -79,11 +100,13 @@ class QuickOrderListComponent extends Component {
     super.disconnectedCallback();
 
     this.removeEventListener(ThemeEvents.quantitySelectorUpdate, this.#debouncedHandleQuantityUpdate);
-    document.removeEventListener(ThemeEvents.cartUpdate, this.#boundHandleCartUpdate);
+    document.removeEventListener(StandardEvents.cartLinesUpdate, this.#boundHandleCartUpdate);
+    document.removeEventListener(StandardEvents.cartDiscountUpdate, this.#handleDiscountUpdate);
     this.removeEventListener('keydown', this.#handleKeyDown, true);
     this.removeEventListener('keyup', this.#handleKeyup, true);
 
     this.#abortController?.abort();
+    this.#confirmationTrigger = null;
   }
 
   /**
@@ -171,9 +194,14 @@ class QuickOrderListComponent extends Component {
     }
 
     await sectionRenderer.renderSection(sectionId, {
+      // Rows carry cart line keys and quantities, which a cached page may no longer match.
+      cache: false,
       url: newURL,
     });
     this.#scrollToTopOfSection();
+    // Morph preserves focus on the pagination button — defer focus to override it
+    // after the morph and any MutationObserver callbacks have settled.
+    requestAnimationFrame(() => this.#focusFirstQuantityInput());
   }
 
   /**
@@ -209,21 +237,33 @@ class QuickOrderListComponent extends Component {
     this.#abortController?.abort();
     this.#abortController = new AbortController();
 
+    /**
+     * Keyed by cart line key rather than variant ID: a variant ID only targets the
+     * first of a variant's lines, leaving any lines split off by discounts behind.
+     * @type {Record<string, number>}
+     */
+    const updates = {};
+
+    for (const lineKey of this.cartLineKeys) {
+      updates[lineKey] = 0;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      resetShimmer(this);
+      return;
+    }
+
+    const deferredPromise = CartLinesUpdateEvent.createPromise();
+    this.dispatchEvent(
+      new CartLinesUpdateEvent({
+        action: 'remove',
+        context: 'cart',
+        lines: this.cartLineKeys.map((key) => ({ id: key, quantity: 0 })),
+        promise: deferredPromise.promise,
+      })
+    );
+
     try {
-      /** @type {Record<string, number>} */
-      const updates = {};
-
-      if (idsToRemove.length > 0) {
-        for (const variantId of idsToRemove) {
-          updates[String(variantId)] = 0;
-        }
-      }
-
-      if (Object.keys(updates).length === 0) {
-        resetShimmer(this);
-        return;
-      }
-
       const sectionIds = this.#getSectionIds();
       const sectionsUrl = new URL(window.location.pathname, window.location.origin);
       sectionsUrl.searchParams.set('page', this.currentPage.toString());
@@ -246,23 +286,101 @@ class QuickOrderListComponent extends Component {
 
       if (data.errors) {
         this.#showErrorMessage(data.errors);
-      } else {
-        this.#updateSectionHTML(data);
-        this.#toggleConfirmationPanel(false);
 
-        document.dispatchEvent(
-          new CartAddEvent(data, this.id, {
-            source: 'quick-order-remove-all',
-            sections: data.sections,
+        const errorMessage = typeof data.errors === 'string' ? data.errors : JSON.stringify(data.errors);
+        deferredPromise.reject(new Error(errorMessage));
+        this.dispatchEvent(
+          new CartErrorEvent({
+            error: errorMessage,
+            code: 'INVALID',
           })
         );
+      } else {
+        deferredPromise.resolve(
+          /** @type {any} */ ({
+            cart: CartLinesUpdateEvent.createCartFromAjaxResponse(data),
+            detail: {
+              source: 'quick-order-remove-all',
+              sections: data.sections,
+              didError: false,
+            },
+          })
+        );
+        this.#updateSectionHTML(data);
+        this.#toggleConfirmationPanel(false);
+        this.#confirmationTrigger = null;
       }
     } catch (error) {
+      deferredPromise.reject(error);
+
       if (error.name !== 'AbortError') {
         resetShimmer(this);
+
+        this.dispatchEvent(
+          new CartErrorEvent({
+            error: error?.message || 'Failed to update cart',
+            code: 'SERVICE_UNAVAILABLE',
+          })
+        );
+
         throw error;
       }
     }
+  }
+
+  /**
+   * Reads the cart lines rendered for a variant row. Discounts such as Buy X Get Y
+   * can split a single variant across several cart lines.
+   * @param {HTMLElement} variantRow - The variant row element
+   * @returns {{ key: string, quantity: number }[]}
+   */
+  #getVariantCartLines(variantRow) {
+    try {
+      const keys = JSON.parse(variantRow.dataset.cartLineKeys || '[]');
+      const quantities = JSON.parse(variantRow.dataset.cartLineQuantities || '[]');
+      if (!Array.isArray(keys) || !Array.isArray(quantities)) return [];
+
+      return keys.map((key, index) => ({ key: String(key), quantity: Number(quantities[index]) || 0 }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Builds an AJAX `updates` payload, keyed by cart line key, that moves a variant's
+   * total cart quantity to `targetQuantity`.
+   *
+   * The cart applies a line update as the difference between the requested quantity
+   * and that line's current quantity. Sending the variant total to one line of a
+   * split variant therefore over-counts by the quantity held in the other lines.
+   * Increases are added to the first line; decreases are taken from the lines in order.
+   * @param {{ key: string, quantity: number }[]} lines - The variant's cart lines
+   * @param {number} currentQuantity - The variant's current total cart quantity
+   * @param {number} targetQuantity - The requested total cart quantity
+   * @returns {Record<string, number>}
+   */
+  #buildLineUpdates(lines, currentQuantity, targetQuantity) {
+    /** @type {Record<string, number>} */
+    const updates = {};
+    const [firstLine] = lines;
+    if (!firstLine) return updates;
+
+    const delta = targetQuantity - currentQuantity;
+    if (delta > 0) {
+      updates[firstLine.key] = firstLine.quantity + delta;
+      return updates;
+    }
+
+    let remaining = -delta;
+    for (const line of lines) {
+      if (remaining <= 0) break;
+
+      const removed = Math.min(line.quantity, remaining);
+      updates[line.key] = line.quantity - removed;
+      remaining -= removed;
+    }
+
+    return updates;
   }
 
   /**
@@ -288,8 +406,16 @@ class QuickOrderListComponent extends Component {
     const variantId = variantRow.dataset.variantId;
     if (!variantId) return;
 
-    const quantityInput = /** @type {HTMLInputElement|null} */ (variantRow.querySelector('input[data-cart-quantity]'));
-    const currentCartQuantity = quantityInput ? parseInt(quantityInput.dataset.cartQuantity || '0') || 0 : 0;
+    const cartLines = this.#getVariantCartLines(variantRow);
+    let currentCartQuantity = 0;
+    if (cartLines.length > 0) {
+      for (const line of cartLines) currentCartQuantity += line.quantity;
+    } else {
+      const quantityInput = /** @type {HTMLInputElement|null} */ (
+        variantRow.querySelector('input[data-cart-quantity]')
+      );
+      currentCartQuantity = quantityInput ? parseInt(quantityInput.dataset.cartQuantity || '0') || 0 : 0;
+    }
 
     this.#clearSuccessMessage();
     this.#clearErrorMessage();
@@ -304,11 +430,63 @@ class QuickOrderListComponent extends Component {
     this.#abortController?.abort();
     this.#abortController = new AbortController();
 
-    try {
-      /** @type {Record<string, number>} */
-      const updates = {};
-      updates[variantId] = quantity;
+    /** @type {'add' | 'remove' | 'update'} */
+    let action;
+    if (currentCartQuantity === 0) {
+      action = 'add';
+    } else if (quantity === 0) {
+      action = 'remove';
+    } else {
+      action = 'update';
+    }
 
+    /** @type {Record<string, number>} */
+    const updates =
+      cartLines.length > 0
+        ? this.#buildLineUpdates(cartLines, currentCartQuantity, quantity)
+        : { [variantId]: quantity };
+
+    const deferredPromise = CartLinesUpdateEvent.createPromise();
+    if (action === 'add') {
+      this.dispatchEvent(
+        new CartLinesUpdateEvent({
+          action,
+          context: 'cart',
+          lines: [{ merchandiseId: variantId, quantity }],
+          promise: deferredPromise.promise,
+        })
+      );
+    } else {
+      // A decrease can empty one split line while another remains, so lines set to zero
+      // are reported as a removal rather than as an update.
+      const lineChanges = Object.entries(updates).map(([id, lineQuantity]) => ({ id, quantity: lineQuantity }));
+      const updatedLines = lineChanges.filter((line) => line.quantity > 0);
+      const removedLines = lineChanges.filter((line) => line.quantity === 0);
+
+      if (updatedLines.length > 0) {
+        this.dispatchEvent(
+          new CartLinesUpdateEvent({
+            action: 'update',
+            context: 'cart',
+            lines: updatedLines,
+            promise: deferredPromise.promise,
+          })
+        );
+      }
+
+      if (removedLines.length > 0) {
+        this.dispatchEvent(
+          new CartLinesUpdateEvent({
+            action: 'remove',
+            context: 'cart',
+            lines: removedLines,
+            promise: deferredPromise.promise,
+          })
+        );
+      }
+    }
+
+    try {
       // Include page parameter in sections URL to maintain pagination state
       const sectionsUrl = new URL(window.location.pathname, window.location.origin);
       sectionsUrl.searchParams.set('page', this.currentPage.toString());
@@ -336,54 +514,81 @@ class QuickOrderListComponent extends Component {
           url.searchParams.set('page', this.currentPage.toString());
           await sectionRenderer.renderSection(this.dataset.sectionId, { cache: false, url });
         }
+
+        const errorMessage = typeof data.errors === 'string' ? data.errors : JSON.stringify(data.errors);
+        deferredPromise.reject(new Error(errorMessage));
+        this.dispatchEvent(
+          new CartErrorEvent({
+            error: errorMessage,
+            code: 'INVALID',
+          })
+        );
       } else {
+        deferredPromise.resolve(
+          /** @type {any} */
+          ({
+            cart: CartLinesUpdateEvent.createCartFromAjaxResponse(data),
+            detail: {
+              sections: data.sections,
+              items: data.items,
+              source: 'quick-order-quantity',
+              variantId: variantId,
+              didError: false,
+            },
+          })
+        );
         this.#updateSectionHTML(data);
+        // Bundled section rendering can fail independently of the cart update.
+        this.#enableQuickOrderListItems();
 
         const quantityAdded = quantity - currentCartQuantity;
         if (quantityAdded > 0) {
           this.#showSuccessMessage(quantityAdded);
         }
-
-        document.dispatchEvent(
-          new CartAddEvent(data, this.id, {
-            source: 'quick-order-quantity',
-            variantId: variantId,
-            sections: data.sections,
-          })
-        );
       }
     } catch (error) {
+      deferredPromise.reject(error);
+
       if (error.name !== 'AbortError') {
         this.#enableQuickOrderListItems();
         resetShimmer(this);
+
+        this.dispatchEvent(
+          new CartErrorEvent({
+            error: error?.message || 'Failed to update cart',
+            code: 'SERVICE_UNAVAILABLE',
+          })
+        );
+
         throw error;
       }
     }
   }
 
   /**
-   * Handles cart update events from other components
-   * @param {CustomEvent} event - The cart update event
+   * Re-renders the section after a discount change. Applying or removing a discount can
+   * merge or re-split cart lines, which changes the line keys and quantities on each row.
+   * Wait for quantity responses before refreshing so their morphs cannot cancel the discount refresh.
+   * @param {Event} event - The cart discount update event
    */
-  async #handleCartUpdate(event) {
-    // Don't process our own events to avoid double updates
-    // Check if this event came from our own quantity update
-    if (event.detail?.source === 'quick-order-quantity' && event.detail?.sourceId === this.id) {
-      return;
-    }
+  #handleDiscountUpdate = async (event) => {
+    const { promise } = /** @type {{ promise?: Promise<unknown> }} */ (event);
+    if (!promise || !this.dataset.sectionId) return;
 
-    this.#enableQuickOrderListItems();
-    this.#abortController?.abort();
-    this.#abortController = new AbortController();
+    // Rows describe the pre-discount cart until the re-render lands, so block edits until then.
+    this.#disableQuickOrderListItems();
 
-    if (event.detail?.data?.sections && this.dataset.sectionId) {
-      this.#updateSectionHTML(event.detail.data);
-      if (event.detail.data.sections[this.dataset.sectionId]) {
-        return;
+    try {
+      const promises = [promise];
+
+      if (this.#pendingQuantityUpdate) {
+        promises.push(this.#pendingQuantityUpdate);
       }
-    }
 
-    if (this.dataset.sectionId) {
+      await Promise.allSettled(promises);
+
+      if (!this.dataset.sectionId) return;
+
       const url = new URL(window.location.href);
       url.searchParams.set('page', this.currentPage.toString());
 
@@ -391,7 +596,61 @@ class QuickOrderListComponent extends Component {
         cache: false,
         url,
       });
+    } catch (error) {
+      if (error?.name !== 'AbortError') {
+        console.warn('[quick-order-list] Discount render failed:', error);
+      }
+    } finally {
+      this.#enableQuickOrderListItems();
     }
+  };
+
+  /**
+   * Handles cart update events from other components. Records this component's own update
+   * promise as a settlement-only value so discount refreshes can wait without double-reporting.
+   * @param {CartLinesUpdateEvent} event - The cart update event
+   */
+  async #handleCartUpdate(event) {
+    if (event.target === this && event.promise) {
+      this.#pendingQuantityUpdate = event.promise.catch(() => undefined);
+      return;
+    }
+
+    // Abort any in-flight fetch immediately (before waiting for the promise),
+    // so rapid updates cancel stale renders without delay.
+    this.#enableQuickOrderListItems();
+    this.#abortController?.abort();
+    this.#abortController = new AbortController();
+
+    const { promise } = event;
+    if (!promise) return;
+
+    promise
+      .then(async ({ detail }) => {
+        // Don't process our own events to avoid double updates
+        if (detail?.source === 'quick-order-quantity' || detail?.source === 'quick-order-remove-all') {
+          return;
+        }
+
+        const sections = detail?.sections;
+        if (sections && this.dataset.sectionId && sections[this.dataset.sectionId]) {
+          this.#updateSectionHTML({ sections });
+          return;
+        }
+
+        if (this.dataset.sectionId) {
+          const url = new URL(window.location.href);
+          url.searchParams.set('page', this.currentPage.toString());
+
+          await sectionRenderer.renderSection(this.dataset.sectionId, {
+            cache: false,
+            url,
+          });
+        }
+      })
+      .catch((error) => {
+        if (error?.name !== 'AbortError') console.warn('[quick-order-list] Event promise rejected:', error);
+      });
   }
 
   #disableQuickOrderListItems() {
@@ -408,6 +667,7 @@ class QuickOrderListComponent extends Component {
    */
   showRemoveAllConfirmation(event) {
     event.preventDefault();
+    this.#confirmationTrigger = /** @type {HTMLElement} */ (event.target);
     this.#toggleConfirmationPanel(true);
   }
 
@@ -418,6 +678,8 @@ class QuickOrderListComponent extends Component {
   hideRemoveAllConfirmation(event) {
     event.preventDefault();
     this.#toggleConfirmationPanel(false);
+    this.#confirmationTrigger?.focus();
+    this.#confirmationTrigger = null;
   }
 
   /**
@@ -490,8 +752,17 @@ class QuickOrderListComponent extends Component {
     // Defer layout read until scroll action to batch with other layout work
     requestAnimationFrame(() => {
       const top = this.getBoundingClientRect().top;
-      window.scrollTo({ top: top + window.scrollY, behavior: 'smooth' });
+      scrollTo({ top: top + getScrollTop(), behavior: 'smooth' });
     });
+  }
+
+  #focusFirstQuantityInput() {
+    for (const input of this.querySelectorAll('input[type="number"][data-cart-quantity]')) {
+      if (input instanceof HTMLElement && input.offsetParent !== null) {
+        input.focus({ preventScroll: true });
+        return;
+      }
+    }
   }
 
   /**
@@ -502,6 +773,8 @@ class QuickOrderListComponent extends Component {
     if (data.sections && this.dataset.sectionId) {
       const sectionHtml = data.sections[this.dataset.sectionId];
       if (sectionHtml) {
+        // A pending section render would otherwise morph older cart markup over this response.
+        sectionRenderer.abortRender(this.dataset.sectionId);
         morphSection(this.dataset.sectionId, sectionHtml);
       }
     }

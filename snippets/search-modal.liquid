@@ -1,3 +1,14 @@
+{% doc %}
+  Renders the search modal dialog with predictive search.
+
+  @param {block} [block] - The block object, used for Shopify editor attributes.
+  @param {string} [class] - Additional CSS classes to apply to the predictive search component.
+{% enddoc %}
+
+{% render 'pills-styles' %}
+{% render 'dialog-styles' %}
+{% render 'predictive-search-styles' %}
+
 <script
   src="{{ 'dialog.js' | asset_url }}"
   type="module"
@@ -29,7 +40,7 @@
       {{ 'content.search' | t }}
     </h2>
     <predictive-search-component
-      class="predictive-search color-{{ settings.popover_color_scheme }}{% if class != blank %} {{ class | strip }}{% endif %}"
+      class="predictive-search color-custom-popover{% if class != blank %} {{ class | strip }}{% endif %}"
       style="--product-corner-radius: {{ settings.product_corner_radius | default: 8 | append: 'px' }}; --card-corner-radius: {{ settings.card_corner_radius | default: 8 | append: 'px' }};{% if settings.card_title_case == 'uppercase' %} --title-case: uppercase;{% endif %}"
       data-section-id="predictive-search"
       data-testid="{{ 'search-component--modal' }}"
@@ -105,7 +116,6 @@
         <div class="predictive-search-form__content-wrapper">
           <div
             class="predictive-search-form__content"
-            tabindex="-1"
             ref="predictiveSearchResults"
             on:click="/handleModalClick"
           >
@@ -188,7 +198,7 @@
     )::before {
     content: '';
     position: absolute;
-    right: calc(var(--padding-sm) + var(--minimum-touch-target));
+    inset-inline-end: calc(var(--padding-sm) + var(--minimum-touch-target));
     top: 0;
     bottom: 0;
     width: var(--border-width-sm);
@@ -208,7 +218,7 @@
       .predictive-search-form__header:has(
         .predictive-search__reset-button:not(.predictive-search__reset-button[hidden])
       )::before {
-      right: calc(var(--padding-2xl) * 2);
+      inset-inline-end: calc(var(--padding-2xl) * 2);
     }
   }
 
@@ -228,8 +238,7 @@
     display: none;
     position: absolute;
     bottom: 0;
-    left: 0;
-    right: 0;
+    inset-inline: 0;
 
     @media screen and (min-width: 750px) {
       --to-top-gradient-background: linear-gradient(
@@ -274,14 +283,13 @@
     position: absolute;
     top: 100%;
     width: 100%;
-    left: 0;
+    inset-inline-start: 0;
     z-index: var(--layer-raised);
     display: flex;
     flex-direction: column;
     border-radius: 0 0 var(--search-border-radius) var(--search-border-radius);
     transition: box-shadow var(--animation-speed) var(--animation-easing);
     transform: translateZ(0);
-    will-change: transform, opacity;
     overflow: hidden;
 
     @media screen and (max-width: 749px) {
@@ -319,7 +327,7 @@
     outline-offset: var(--focus-outline-offset);
 
     @media screen and (min-width: 750px) {
-      outline: var(--focus-outline-width) solid var(--color-primary);
+      outline: var(--focus-outline-width) solid var(--color-foreground);
     }
   }
 
@@ -362,31 +370,31 @@
     border: 0;
   }
 
-  .search-input::placeholder {
-    color: rgb(var(--color-foreground-rgb) / var(--opacity-subdued-text));
+  input.search-input::placeholder {
+    color: rgb(var(--color-rgb, var(--color-foreground-rgb)) / var(--opacity-muted-text));
   }
 
-  .search-input,
-  .search-input:is(:focus, :focus-visible, :focus-within),
+  input.search-input,
+  input.search-input:is(:focus, :focus-visible, :focus-within),
   .predictive-search-form__header *:is(:focus, :focus-visible) {
     outline: none;
     box-shadow: none;
   }
 
-  .search-input:hover {
+  input.search-input:hover {
     background-color: transparent;
   }
 
   .predictive-search__icon {
     position: absolute;
-    left: var(--margin-xl);
+    inset-inline-start: var(--margin-xl);
     top: auto;
     width: var(--icon-size-lg);
     height: var(--icon-size-lg);
-    color: rgb(var(--color-foreground-rgb) / var(--opacity-60));
+    color: rgb(var(--color-rgb, var(--color-foreground-rgb)) / var(--opacity-60));
 
     @media screen and (min-width: 750px) {
-      left: var(--margin-md);
+      inset-inline-start: var(--margin-md);
     }
   }
 
@@ -441,7 +449,7 @@
     border-radius: 50%;
 
     &:hover {
-      background-color: rgb(var(--color-primary-hover-rgb) / var(--opacity-8));
+      background-color: rgb(var(--color-foreground-rgb) / var(--opacity-8));
     }
   }
 
